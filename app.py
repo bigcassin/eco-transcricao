@@ -230,6 +230,7 @@ class SetupDialog(QDialog):
         downloaded = self._cache_size()
         expected   = MODEL_SIZES.get(self._model, 1)
         pct = min(int(downloaded / expected * 100), 99)
+        self.prog.setRange(0, 100)  # garante que sai do modo indeterminado
         self.prog.setValue(pct)
         mb = downloaded / 1_000_000
         total_mb = expected / 1_000_000
