@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QCheckBox, QFileDialog, QListWidget, QListWidgetItem, QFrame,
     QMessageBox, QDialog,
 )
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QFont
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -24,6 +24,13 @@ MODEL_REPOS = {
     "large-v3": "Systran/faster-whisper-large-v3",
     "medium":   "Systran/faster-whisper-medium",
     "small":    "Systran/faster-whisper-small",
+}
+
+# Tamanho esperado de cada modelo em bytes (para barra de progresso)
+MODEL_SIZES = {
+    "large-v3": 3_100_000_000,
+    "medium":   1_500_000_000,
+    "small":      490_000_000,
 }
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v", ".3gp"}
@@ -70,38 +77,14 @@ class SetupWorker(QThread):
     def run(self):
         try:
             from huggingface_hub import snapshot_download
-            import huggingface_hub
-
             repo_id = MODEL_REPOS[self.model_size]
-            self.status.emit(f"Baixando modelo {self.model_size}…")
+            self.status.emit(f"Conectando…")
             self.progress.emit(-1)
-
-            # Track downloaded bytes via tqdm monkey-patch
-            original_tqdm = huggingface_hub.utils._tqdm.tqdm
-
-            outer = self
-
-            class ProgressTqdm(original_tqdm):
-                def __init__(self, *a, **kw):
-                    super().__init__(*a, **kw)
-                    self._total = kw.get("total", 0) or 0
-
-                def update(self, n=1):
-                    super().update(n)
-                    if self._total > 0:
-                        pct = int(self.n / self._total * 100)
-                        outer.progress.emit(min(pct, 99))
-
-            try:
-                huggingface_hub.utils._tqdm.tqdm = ProgressTqdm
-                snapshot_download(repo_id=repo_id)
-            finally:
-                huggingface_hub.utils._tqdm.tqdm = original_tqdm
-
+            # Download limpo — progresso é monitorado externamente via cache dir
+            snapshot_download(repo_id=repo_id)
             self.progress.emit(100)
             self.status.emit("Modelo pronto!")
             self.done.emit(self.model_size)
-
         except Exception as e:
             self.error.emit(str(e))
 
@@ -207,29 +190,62 @@ class SetupDialog(QDialog):
         QPushButton#btnSetup:disabled { background: #252540; color: #555; }
         """)
 
+    def _cache_dir(self) -> Path:
+        name = MODEL_REPOS[self._model].replace("/", "--")
+        return Path.home() / ".cache" / "huggingface" / "hub" / f"models--{name}"
+
+    def _cache_size(self) -> int:
+        d = self._cache_dir()
+        if not d.exists():
+            return 0
+        total = 0
+        for f in d.rglob("*"):
+            try:
+                if f.is_file():
+                    total += f.stat().st_size
+            except Exception:
+                pass
+        return total
+
     def _start_download(self):
         self.btn.setEnabled(False)
         self.btn.setText("Baixando…")
+        self.prog.setRange(0, 100)
+        self.prog.setValue(0)
+
+        # Timer que monitora o cache a cada segundo
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._poll_progress)
+        self._timer.start()
+
         self.worker = SetupWorker(self._model)
-        self.worker.status.connect(self._on_status)
+        self.worker.status.connect(self.status_lbl.setText)
         self.worker.progress.connect(self._on_progress)
         self.worker.done.connect(self._on_done)
         self.worker.error.connect(self._on_error)
         self.worker.start()
 
-    def _on_status(self, msg: str):
-        self.status_lbl.setText(msg)
+    def _poll_progress(self):
+        downloaded = self._cache_size()
+        expected   = MODEL_SIZES.get(self._model, 1)
+        pct = min(int(downloaded / expected * 100), 99)
+        self.prog.setValue(pct)
+        mb = downloaded / 1_000_000
+        total_mb = expected / 1_000_000
+        self.prog.setFormat(f"{mb:.0f} MB / {total_mb:.0f} MB  ({pct}%)")
+        self.status_lbl.setText(f"Baixando modelo {self._model}…")
 
     def _on_progress(self, pct: int):
         if pct == -1:
-            self.prog.setRange(0, 0)  # indeterminate
+            self.prog.setRange(0, 0)
             self.prog.setFormat("Conectando…")
         else:
             self.prog.setRange(0, 100)
-            self.prog.setValue(pct)
-            self.prog.setFormat(f"{pct}%")
 
     def _on_done(self, model_size: str):
+        if hasattr(self, "_timer"):
+            self._timer.stop()
         self.prog.setRange(0, 100)
         self.prog.setValue(100)
         self.prog.setFormat("✅ Pronto!")
@@ -239,11 +255,14 @@ class SetupDialog(QDialog):
         self.accept()
 
     def _on_error(self, msg: str):
+        if hasattr(self, "_timer"):
+            self._timer.stop()
         self.btn.setEnabled(True)
         self.btn.setText("Tentar novamente")
         self.status_lbl.setText(f"Erro: {msg}")
         self.prog.setRange(0, 100)
         self.prog.setValue(0)
+        self.prog.setFormat("Erro — tente novamente")
 
 
 # ── Transcription Worker ──────────────────────────────────────────────────────
