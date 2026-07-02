@@ -54,3 +54,19 @@ There are no build, lint, or test commands in this repo — none are configured.
 - Model sizes are one of `large-v3` (default, ~1.5GB), `medium`, `small`, mapped to `Systran/faster-whisper-<size>` on the Hugging Face Hub (see `MODEL_REPOS` in `app.py`).
 - Transcription is hardcoded to Portuguese (`language="pt"`) with `vad_filter=True` and `word_timestamps=True` in both scripts.
 - `.gitignore` implies packaging with PyInstaller (`dist/`, `build/`, `*.spec`) even though no spec file is currently checked in.
+
+## Commit convention: mark the device of origin
+
+The repo owner works from both a phone and a home PC. **Every commit made by Claude Code must include a trailer line identifying which device the session ran on**, so it's traceable in `git log`.
+
+Detect the device from the `CLAUDE_CODE_ENTRYPOINT` environment variable at the start of the session:
+- Contains `mobile` → append `Origem: 📱 Celular`
+- Otherwise (desktop app, CLI, web) → append `Origem: 💻 PC`
+
+Add this as the last line of the commit message body (after any `Co-Authored-By`/session trailers already required by the harness), e.g.:
+
+```
+fix: corrige extração de frames em vídeos .webm
+
+Origem: 📱 Celular
+```
